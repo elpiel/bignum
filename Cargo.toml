@@ -1,0 +1,11 @@
+[package]
+authors = ["Lachezar Lechev <elpiel93@gmail.com>"]
+edition = "2018"
+name = "bignum"
+version = "0.1.0"
+
+[dependencies]
+num = {version = "0.3", features = ["serde"]}
+serde = {version = "^1.0", features = ["derive"]}
+thiserror = "^1.0"
+lazy_static = "^1.0"
