@@ -1,112 +1,129 @@
-use num::{bigint::Sign, traits::Pow, BigInt, BigUint, Integer};
-use std::{num::NonZeroI16, num::NonZeroU8, ops::Mul};
+use num::{traits::Pow, BigUint, Integer};
+use std::{cmp::Ordering, num::NonZeroU32, num::NonZeroU8, ops::Mul};
 
 // Idea for setting up the tokens in primitives
 lazy_static::lazy_static! {
+    // Idea of how to define the multipliers and use these statics
+    pub static ref M1: Multiplier = Multiplier::new(NonZeroU8::new(1).expect("OK"));
+    pub static ref M2: Multiplier = Multiplier::new(NonZeroU8::new(2).expect("OK"));
+    pub static ref M18: Multiplier = Multiplier::new(NonZeroU8::new(18).expect("OK"));
+    pub static ref M30: Multiplier = Multiplier::new(NonZeroU8::new(30).expect("OK"));
+
     pub static ref DAI: Token = Token {
         address: [0_u8; 20],
-        multiplier: NonZeroU8::new(18).expect("Should create NonZeroU8 from 18"),
+        multiplier: M18.clone(),
     };
 }
 
-// TODO: Is this necessary
+// TODO: Is this necessary?
 pub struct Token {
     pub address: [u8; 20],
-    pub multiplier: NonZeroU8,
+    pub multiplier: Multiplier,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Multiplier(BigUint);
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct BigNum(BigUint, Multiplier);
 
-pub fn convert_multipliers(
-    into_multiplier: NonZeroU8,
-    (from_multiplier, value): (NonZeroU8, BigUint),
-) -> BigUint {
-    let diff_multiplier =
-        i16::from(NonZeroI16::from(into_multiplier)) - i16::from(NonZeroI16::from(from_multiplier));
+impl Multiplier {
+    fn new(multiplier: NonZeroU8) -> Self {
+        let multiplier_pow = u32::from(NonZeroU32::from(multiplier));
 
-    match BigInt::from(diff_multiplier).into_parts() {
-        (Sign::Plus, multiplier) => {
-            let power = BigUint::from(10_u16).pow(&multiplier);
-            BigUint::from(value).mul(power)
+        Self(BigUint::from(10_u16).pow(multiplier_pow))
+    }
+}
+
+impl std::ops::Sub<&Multiplier> for &Multiplier {
+    type Output = (Ordering, Multiplier);
+
+    fn sub(self, rhs: &Multiplier) -> Self::Output {
+        let order = self.0.cmp(&rhs.0);
+
+        match &order {
+            Ordering::Less => (order, Multiplier((&rhs.0).div_floor(&self.0))),
+            Ordering::Equal => (order, Multiplier(self.0.to_owned())),
+            Ordering::Greater => (order, Multiplier((&self.0).div_floor(&rhs.0))),
         }
-        (Sign::Minus, multiplier) => {
-            let power = BigUint::from(10_u16).pow(&multiplier);
+    }
+}
 
-            BigUint::from(value).div_floor(&power)
-        }
-        _ => unreachable!(),
+impl std::ops::Sub<Multiplier> for BigNum {
+    type Output = BigNum;
+
+    fn sub(self, rhs: Multiplier) -> Self::Output {
+        convert_multipliers(rhs, self)
+    }
+}
+
+pub fn convert_multipliers(into_multiplier: Multiplier, from_bignum: BigNum) -> BigNum {
+    match &into_multiplier - &from_bignum.1 {
+        (Ordering::Less, multiplier) => BigNum(from_bignum.0.div_floor(&multiplier.0), into_multiplier),
+        (Ordering::Greater, multiplier) => BigNum(from_bignum.0.mul(&multiplier.0), into_multiplier),
+        (Ordering::Equal, _) => from_bignum
     }
 }
 
 #[cfg(test)]
 mod test {
-
     use super::*;
 
     #[test]
+    fn test_multiplier_and_multiplier_subtraction() {
+        let ten = Multiplier::new(NonZeroU8::new(10).unwrap());
+
+        assert_eq!(&BigUint::from(10_000_000_000_u64), &ten.0);
+
+        let twenty = Multiplier::new(NonZeroU8::new(20).unwrap());
+
+        assert_eq!((Ordering::Greater, ten.clone()), &twenty - &ten);
+        assert_eq!((Ordering::Less, ten.clone()), &ten - &twenty);
+        assert_eq!((Ordering::Equal, ten.clone()), &ten - &ten);
+    }
+
+
+
+    #[test]
     fn test_convert_multipliers_roundtrip() {
-        let dai_multiplier = NonZeroU8::new(18).unwrap();
-        let other_multiplier = NonZeroU8::new(30).unwrap();
+        let dai_multiplier = Multiplier::new(NonZeroU8::new(18).unwrap());
+        let other_multiplier = Multiplier::new(NonZeroU8::new(30).unwrap());
 
-        let input_value: (NonZeroU8, BigUint) =
-            (other_multiplier, BigUint::from(321_000_000_000_000_u64));
+        let input_value = BigNum(
+            BigUint::from(321_000_000_000_000_u64),
+            other_multiplier.clone(),
+        );
 
-        let dai_actual = convert_multipliers(dai_multiplier, input_value.clone());
+        let dai_actual = convert_multipliers(dai_multiplier.clone(), input_value.clone());
+        let dai_expected = BigNum(BigUint::from(321_u16), dai_multiplier);
+        assert_eq!(dai_actual, dai_expected);
 
-        assert_eq!(dai_actual, BigUint::from(321_u16));
-
-        let other_actual = convert_multipliers(other_multiplier, (dai_multiplier, dai_actual));
+        let other_actual = convert_multipliers(other_multiplier, dai_actual);
 
         assert_eq!(
-            other_actual, input_value.1,
-            "No flooring involved so it should result in the same input"
+            other_actual, input_value,
+            "No flooring involved so it should result in the same as input"
         );
     }
 
     #[test]
     fn test_convert_multipliers_roundtrip_with_flooring() {
-        let dai_multiplier = NonZeroU8::new(18).unwrap();
-        let other_multiplier = NonZeroU8::new(30).unwrap();
+        let dai_multiplier = Multiplier::new(NonZeroU8::new(18).unwrap());
+        let other_multiplier = Multiplier::new(NonZeroU8::new(30).unwrap());
 
-        let input_value: (NonZeroU8, BigUint) =
-            (other_multiplier, BigUint::from(321_999_999_999_999_u64));
+        let input_value = BigNum(
+            BigUint::from(321_999_999_999_999_u64),
+            other_multiplier.clone(),
+        );
 
-        let dai_actual = convert_multipliers(dai_multiplier, input_value.clone());
+        let dai_actual = convert_multipliers(dai_multiplier.clone(), input_value.clone());
+        let dai_expected = BigNum(BigUint::from(321_u16), dai_multiplier);
 
-        assert_eq!(dai_actual, BigUint::from(321_u16));
+        assert_eq!(dai_actual, dai_expected);
 
-        let other_actual = convert_multipliers(other_multiplier, (dai_multiplier, dai_actual));
-        let other_expected = BigUint::from(321_000_000_000_000_u64);
+        let other_actual = convert_multipliers(other_multiplier.clone(), dai_actual);
+        let other_expected = BigNum(BigUint::from(321_000_000_000_000_u64), other_multiplier);
 
         assert_eq!(other_actual, other_expected);
-    }
-
-    #[test]
-    #[ignore = "No reason yet, just testing"]
-    fn multiplier_math() {
-        let dai_multiplier: (u8, BigUint) = (18, BigUint::from(10_u16).pow(18_u32));
-        let other_multiplier: (u8, BigUint) = (30, BigUint::from(10_u16).pow(30_u32));
-
-        // In DAI this will be `321`
-        let input_value: (u8, u64) = (other_multiplier.0, 321_000_000_000_000);
-
-        let real_value_multiplier = i16::from(dai_multiplier.0) - i16::from(other_multiplier.0);
-
-        assert_eq!(-12_i16, real_value_multiplier);
-
-        let dai_value = match BigInt::from(real_value_multiplier).into_parts() {
-            (Sign::Plus, multiplier) => {
-                let power = BigUint::from(10_u16).pow(&multiplier);
-                BigUint::from(input_value.1).mul(power)
-            }
-            (Sign::Minus, multiplier) => {
-                let power = BigUint::from(10_u16).pow(&multiplier);
-
-                BigUint::from(input_value.1).div_floor(&power)
-            }
-            _ => unreachable!(),
-        };
-
-        assert_eq!(dai_value, BigUint::from(321_u16))
     }
 }
